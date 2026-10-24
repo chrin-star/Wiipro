@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<app><name>Wii Pro Controller Detector</name><coder>Community prototype</coder><version>0.1</version><short_description>USB detection experiment</short_description><long_description>Scans HID devices for Nintendo Switch Pro Controller 057E:2009. No IOS changes.</long_description></app>
