@@ -1,4 +1,5 @@
 #include <gccore.h>
+#include <wiiuse/wpad.h>
 #include <ogc/usb.h>
 #include <stdio.h>
 #include <stdlib.h>
