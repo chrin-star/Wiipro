@@ -399,7 +399,6 @@ int main(int argc, char **argv)
                         stopping = 1;
                     }
 
-                } else if (state == 2 && id == 0x30) {
 
                 } else if (state == 2 && id == 0x30) {
                     reports++;
