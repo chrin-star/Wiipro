@@ -181,6 +181,24 @@ static void show_buttons(const u8 *p)
 
     printf("Right stick: X=%4d Y=%4d\n",
            right_x(p), right_y(p));
+
+    printf("\nMOVIMIENTO DEL PRO CONTROLLER\n");
+printf("Muestra |   AX   AY   AZ |   GX   GY   GZ\n");
+
+for (int i = 0; i < 3; i++) {
+    int offset = 13 + (i * 12);
+
+    s16 ax = read_s16_le(&p[offset]);
+    s16 ay = read_s16_le(&p[offset + 2]);
+    s16 az = read_s16_le(&p[offset + 4]);
+
+    s16 gx = read_s16_le(&p[offset + 6]);
+    s16 gy = read_s16_le(&p[offset + 8]);
+    s16 gz = read_s16_le(&p[offset + 10]);
+
+    printf("%d       | %5d %5d %5d | %5d %5d %5d\n",
+           i + 1, ax, ay, az, gx, gy, gz);
+}
 }
 
 int main(int argc, char **argv)
@@ -361,23 +379,25 @@ int main(int argc, char **argv)
                            (long)result);
 
                     if (result >= 0) {
-                        result = send_subcommand(fd, 0x40, 0x01);
-                            
-            printf("Enable IMU: %ld\n", (long)result);
+    result = send_subcommand(fd, 0x40, 0x01);
+    printf("Enable IMU: %ld\n", (long)result);
 
-           if (result >= 0) {
-                 result = send_subcommand(fd, 0x03, 0x30);
-                printf("Set report mode 0x30: %ld\n",
-                 (long)result);
+    if (result >= 0) {
+        result = send_subcommand(fd, 0x03, 0x30);
+        printf("Set report mode 0x30: %ld\n",
+               (long)result);
 
-    if (result >= 0)
-        state = 2;
-    else
+        if (result >= 0) {
+            state = 2;
+        } else {
+            stopping = 1;
+        }
+    } else {
         stopping = 1;
+    }
 } else {
     stopping = 1;
-
-                    } else {
+} else {
                         stopping = 1;
                     }
 
