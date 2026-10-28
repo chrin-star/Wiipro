@@ -2,40 +2,201 @@
 #include <gccore.h>
 #include <wiiuse/wpad.h>
 #include <ogc/usb.h>
-
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
-#define PRO_VID 0x057E
-#define PRO_PID 0x2009
 #define MAX_USB 32
+#define VID 0x057E
+#define PID 0x2009
+#define EP_IN  0x81
+#define EP_OUT 0x01
+#define SIZE 64
 
-static usb_device_entry devices[MAX_USB] ATTRIBUTE_ALIGN(32);
-static u8 input[64] ATTRIBUTE_ALIGN(32);
-static u8 output[64] ATTRIBUTE_ALIGN(32);
+static u8 inbuf[SIZE] __attribute__((aligned(32)));
+static u8 outbuf[SIZE] __attribute__((aligned(32)));
 
-static s32 fd = -1;
-static u8 endpoint_in = 0x81;
-static u8 endpoint_out = 0x01;
-static u8 counter = 0;
+static volatile int pending = 0;
+static volatile int finished = 0;
+static volatile s32 read_result = 0;
 
-static s16 read16(const u8 *p)
+static s32 callback(s32 result, void *unused)
 {
-    return (s16)((u16)p[0] | ((u16)p[1] << 8));
+    (void)unused;
+    read_result = result;
+    finished = 1;
+    pending = 0;
+    return 0;
 }
 
-static void init_screen(void)
+static int home(void)
+{
+    WPAD_ScanPads();
+    return (WPAD_ButtonsDown(0) & WPAD_BUTTON_HOME) != 0;
+}
+
+static void screen(void)
+{
+    printf("\x1b[2J\x1b[H");
+    printf("Wii Pro Controller v1.0 EXP\n");
+    printf("===========================\n\n");
+}
+
+static s32 send_usb(s32 fd, u8 command)
+{
+    memset(outbuf, 0, SIZE);
+    outbuf[0] = 0x80;
+    outbuf[1] = command;
+
+    return USB_WriteIntrMsg(fd, EP_OUT, SIZE, outbuf);
+}
+
+static u8 packet_counter = 0;
+
+static s32 send_subcommand(s32 fd, u8 command, u8 value)
+{
+    memset(outbuf, 0, SIZE);
+
+    outbuf[0] = 0x01;  // Reporte de salida
+    outbuf[1] = packet_counter++ & 0x0F;
+
+    // Vibración neutral
+    outbuf[2] = 0x00;
+    outbuf[3] = 0x01;
+    outbuf[4] = 0x40;
+    outbuf[5] = 0x40;
+
+    outbuf[6] = 0x00;
+    outbuf[7] = 0x01;
+    outbuf[8] = 0x40;
+    outbuf[9] = 0x40;
+
+    outbuf[10] = command;
+    outbuf[11] = value;
+
+    return USB_WriteIntrMsg(fd, EP_OUT, SIZE, outbuf);
+}
+
+static s16 read_s16_le(const u8 *p)
+{
+    return (s16)(
+        (u16)p[0] |
+        ((u16)p[1] << 8)
+    );
+}
+
+static s32 set_report_mode(s32 fd)
+{
+    memset(outbuf, 0, SIZE);
+
+    outbuf[0] = 0x01; /* Output report */
+    outbuf[1] = 0x00; /* Packet counter */
+
+    /* Neutral rumble data */
+    outbuf[2] = 0x00;
+    outbuf[3] = 0x01;
+    outbuf[4] = 0x40;
+    outbuf[5] = 0x40;
+
+    outbuf[6] = 0x00;
+    outbuf[7] = 0x01;
+    outbuf[8] = 0x40;
+    outbuf[9] = 0x40;
+
+    outbuf[10] = 0x03; /* Set input report mode */
+    outbuf[11] = 0x30; /* Full input reports */
+
+    return USB_WriteIntrMsg(fd, EP_OUT, SIZE, outbuf);
+}
+
+static void dump_packet(const u8 *p, int length)
+{
+    if (length > SIZE) length = SIZE;
+
+    for (int i = 0; i < length; i++) {
+        printf("%02X ", p[i]);
+
+        if ((i + 1) % 16 == 0)
+            printf("\n");
+    }
+
+    printf("\n");
+}
+
+static int stick_x(const u8 *p)
+{
+    return p[6] | ((p[7] & 0x0F) << 8);
+}
+
+static int stick_y(const u8 *p)
+{
+    return (p[7] >> 4) | (p[8] << 4);
+}
+
+static int right_x(const u8 *p)
+{
+    return p[9] | ((p[10] & 0x0F) << 8);
+}
+
+static int right_y(const u8 *p)
+{
+    return (p[10] >> 4) | (p[11] << 4);
+}
+
+static void show_buttons(const u8 *p)
+{
+    u8 b0 = p[3];
+    u8 b1 = p[4];
+    u8 b2 = p[5];
+
+    printf("Buttons:\n");
+
+    if (b0 & 0x08) printf("A ");
+    if (b0 & 0x04) printf("B ");
+    if (b0 & 0x02) printf("X ");
+    if (b0 & 0x01) printf("Y ");
+
+    if (b0 & 0x40) printf("R ");
+    if (b0 & 0x80) printf("ZR ");
+
+    if (b2 & 0x40) printf("L ");
+    if (b2 & 0x80) printf("ZL ");
+
+    if (b1 & 0x01) printf("MINUS ");
+    if (b1 & 0x02) printf("PLUS ");
+    if (b1 & 0x10) printf("HOME ");
+    if (b1 & 0x20) printf("CAPTURE ");
+
+    if (b2 & 0x02) printf("UP ");
+    if (b2 & 0x01) printf("DOWN ");
+    if (b2 & 0x08) printf("LEFT ");
+    if (b2 & 0x04) printf("RIGHT ");
+
+    if (b1 & 0x08) printf("L-STICK ");
+    if (b1 & 0x04) printf("R-STICK ");
+
+    printf("\n\n");
+
+    printf("Left stick : X=%4d Y=%4d\n",
+           stick_x(p), stick_y(p));
+
+    printf("Right stick: X=%4d Y=%4d\n",
+           right_x(p), right_y(p));
+}
+
+int main(int argc, char **argv)
 {
     VIDEO_Init();
 
     GXRModeObj *mode = VIDEO_GetPreferredMode(NULL);
-    void *fb = MEM_K0_TO_K1(SYS_AllocateFramebuffer(mode));
+
+    void *fb = MEM_K0_TO_K1(
+        SYS_AllocateFramebuffer(mode)
+    );
 
     console_init(
         fb, 20, 20,
-        mode->fbWidth, mode->xfbHeight,
+        mode->fbWidth,
+        mode->xfbHeight,
         mode->fbWidth * VI_DISPLAY_PIX_SZ
     );
 
@@ -44,251 +205,231 @@ static void init_screen(void)
     VIDEO_SetBlack(FALSE);
     VIDEO_Flush();
     VIDEO_WaitVSync();
-}
 
-static int find_pro_controller(void)
-{
-    u8 count = 0;
+    if (mode->viTVMode & VI_NON_INTERLACE)
+        VIDEO_WaitVSync();
 
-    memset(devices, 0, sizeof(devices));
+    WPAD_Init();
+    screen();
 
-    s32 ret = USB_GetDeviceList(
-        devices, MAX_USB, USB_CLASS_HID, &count
-    );
+    s32 result = USB_Initialize();
 
-    if (ret < 0)
-        return ret;
+    printf("USB init: %ld\n", (long)result);
 
-    for (int i = 0; i < count; i++)
-    {
-        if (devices[i].vid == PRO_VID &&
-            devices[i].pid == PRO_PID)
-        {
-            ret = USB_OpenDevice(
-                devices[i].device_id,
-                PRO_VID,
-                PRO_PID,
-                &fd
+    if (result < 0) {
+        printf("USB initialization failed.\n");
+
+        while (!home())
+            VIDEO_WaitVSync();
+
+        return 1;
+    }
+
+    s32 fd = -1;
+    int connected = 0;
+
+    printf("Searching for controller...\n");
+
+    while (!connected) {
+        if (home())
+            goto cleanup;
+
+        usb_device_entry entries[MAX_USB];
+        memset(entries, 0, sizeof(entries));
+
+        u8 count = 0;
+
+        result = USB_GetDeviceList(
+            entries, MAX_USB, USB_CLASS_HID, &count
+        );
+
+        if (result >= 0) {
+            for (unsigned i = 0; i < count; i++) {
+                if (entries[i].vid != VID ||
+                    entries[i].pid != PID)
+                    continue;
+
+                result = USB_OpenDevice(
+                    entries[i].device_id,
+                    VID, PID, &fd
+                );
+
+                printf("Open: %ld\n", (long)result);
+
+                if (result >= 0 && fd >= 0)
+                    connected = 1;
+
+                break;
+            }
+        }
+
+        if (!connected) {
+            for (int i = 0; i < 120; i++) {
+                if (home())
+                    goto cleanup;
+
+                VIDEO_WaitVSync();
+            }
+        }
+    }
+
+    printf("Controller connected!\n");
+
+    /*
+     * Protocol states:
+     * 0 = waiting for 81 01
+     * 1 = waiting for 81 02
+     * 2 = waiting for full input reports
+     */
+    int state = 0;
+    unsigned reports = 0;
+    unsigned frames_waiting = 0;
+    int stopping = 0;
+
+    result = send_usb(fd, 0x01);
+
+    printf("Identify write: %ld\n", (long)result);
+
+    if (result < 0)
+        goto cleanup;
+
+    while (1) {
+        if (home())
+            stopping = 1;
+
+        /*
+         * Never close the device while an
+         * asynchronous read is pending.
+         */
+        if (stopping && !pending)
+            break;
+
+        if (!stopping && !pending && !finished) {
+            memset(inbuf, 0, SIZE);
+
+            pending = 1;
+
+            result = USB_ReadIntrMsgAsync(
+                fd, EP_IN, SIZE,
+                inbuf, callback, NULL
             );
 
-            if (ret < 0)
-                return ret;
-
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-static s32 usb_command(u8 command)
-{
-    memset(output, 0, sizeof(output));
-
-    output[0] = 0x80;
-    output[1] = command;
-
-    return USB_WriteIntrMsg(
-        fd, endpoint_out, 64, output
-    );
-}
-
-static s32 subcommand(u8 command, u8 value)
-{
-    memset(output, 0, sizeof(output));
-
-    output[0] = 0x01;
-    output[1] = counter++ & 0x0F;
-
-    /* Neutral rumble data */
-    output[2] = 0x00;
-    output[3] = 0x01;
-    output[4] = 0x40;
-    output[5] = 0x40;
-
-    output[6] = 0x00;
-    output[7] = 0x01;
-    output[8] = 0x40;
-    output[9] = 0x40;
-
-    output[10] = command;
-    output[11] = value;
-
-    return USB_WriteIntrMsg(
-        fd, endpoint_out, 64, output
-    );
-}
-
-static void show_report(s32 length)
-{
-    printf("\x1b[2J\x1b[H");
-
-    printf("WII PRO CONTROLLER DETECTOR v0.2\n");
-    printf("--------------------------------\n\n");
-
-    printf("Nintendo Switch Pro Controller\n");
-    printf("USB connection: ACTIVE\n\n");
-
-    printf("Report: 0x%02X\n", input[0]);
-    printf("Length: %ld bytes\n\n", (long)length);
-
-    if (input[0] != 0x30 || length < 49)
-    {
-        printf("Waiting for full report 0x30...\n\n");
-
-        printf("RAW DATA:\n");
-
-        for (int i = 0; i < length && i < 32; i++)
-        {
-            printf("%02X ", input[i]);
-
-            if ((i + 1) % 8 == 0)
-                printf("\n");
+            if (result < 0) {
+                pending = 0;
+                printf("Read submit error: %ld\n",
+                       (long)result);
+                stopping = 1;
+            }
         }
 
-        printf("\n");
-        return;
-    }
+        if (finished) {
+            finished = 0;
+            frames_waiting = 0;
 
-    printf("BUTTONS (RAW)\n");
-    printf("%02X %02X %02X\n\n",
-           input[3], input[4], input[5]);
+            if (read_result < 0) {
+                printf("Read error: %ld\n",
+                       (long)read_result);
+                stopping = 1;
+            } else {
+                u8 id = inbuf[0];
 
-    u16 lx = input[6] |
-             ((input[7] & 0x0F) << 8);
+                if (state == 0 &&
+                    id == 0x81 &&
+                    inbuf[1] == 0x01) {
 
-    u16 ly = (input[7] >> 4) |
-             (input[8] << 4);
+                    printf("Identify reply OK.\n");
 
-    u16 rx = input[9] |
-             ((input[10] & 0x0F) << 8);
+                    result = send_usb(fd, 0x02);
 
-    u16 ry = (input[10] >> 4) |
-             (input[11] << 4);
+                    printf("Handshake write: %ld\n",
+                           (long)result);
 
-    printf("ANALOG STICKS\n");
-    printf("LEFT:  X:%4u Y:%4u\n", lx, ly);
-    printf("RIGHT: X:%4u Y:%4u\n\n", rx, ry);
+                    if (result >= 0)
+                        state = 1;
+                    else
+                        stopping = 1;
 
-    printf("ACCELEROMETER - RAW VALUES\n");
+                } else if (state == 1 &&
+                           id == 0x81 &&
+                           inbuf[1] == 0x02) {
 
-    for (int i = 0; i < 3; i++)
-    {
-        int offset = 13 + i * 12;
+                    printf("Handshake reply OK.\n");
 
-        s16 x = read16(&input[offset]);
-        s16 y = read16(&input[offset + 2]);
-        s16 z = read16(&input[offset + 4]);
+                    result = send_usb(fd, 0x04);
 
-        printf(
-            "S%d X:%6d Y:%6d Z:%6d\n",
-            i + 1, x, y, z
-        );
-    }
+                    printf("Force USB: %ld\n",
+                           (long)result);
 
-    printf("\nGYROSCOPE - RAW VALUES\n");
+                    if (result >= 0) {
+                        result = send_subcommand(fd, 0x40, 0x01);
+                            
+            printf("Enable IMU: %ld\n", (long)result);
 
-    for (int i = 0; i < 3; i++)
-    {
-        int offset = 19 + i * 12;
+           if (result >= 0) {
+                 result = send_subcommand(fd, 0x03, 0x30);
+                printf("Set report mode 0x30: %ld\n",
+                 (long)result);
 
-        s16 x = read16(&input[offset]);
-        s16 y = read16(&input[offset + 2]);
-        s16 z = read16(&input[offset + 4]);
+    if (result >= 0)
+        state = 2;
+    else
+        stopping = 1;
+} else {
+    stopping = 1;
 
-        printf(
-            "S%d X:%6d Y:%6d Z:%6d\n",
-            i + 1, x, y, z
-        );
-    }
+                    } else {
+                        stopping = 1;
+                    }
 
-    printf("\nMove and tilt the controller.\n");
-}
+                } else if (state == 2 && id == 0x30) {
+                    reports++;
 
-int main(int argc, char **argv)
-{
-    init_screen();
-    WPAD_Init();
+                    /*
+                     * Refresh at most every fourth
+                     * input report.
+                     */
+                    if (reports == 1 ||
+                        reports % 4 == 0) {
 
-    printf("Wii Pro Controller Detector v0.2\n\n");
+                        screen();
 
-    s32 ret = USB_Initialize();
+                        printf("USB: CONNECTED\n");
+                        printf("Full reports: %u\n\n",
+                               reports);
 
-    if (ret < 0)
-    {
-        printf("USB initialization failed: %ld\n",
-               (long)ret);
+                        show_buttons(inbuf);
 
-        while (1)
-            VIDEO_WaitVSync();
-    }
+                        printf("\nHOME on Wii Remote: Exit\n");
+                    }
 
-    printf("Connect your ORIGINAL Nintendo\n");
-    printf("Switch Pro Controller via USB.\n\n");
+                } else {
+                    screen();
 
-    while (fd < 0)
-    {
-        ret = find_pro_controller();
-
-        if (ret == 1)
-            break;
-
-        printf("\rSearching... %ld    ", (long)ret);
-        fflush(stdout);
-
-        sleep(2);
-    }
-
-    printf("\n\nController detected!\n");
-    printf("Initializing...\n");
-
-    ret = usb_command(0x01);
-    printf("USB handshake 1: %ld\n", (long)ret);
-    usleep(100000);
-
-    ret = usb_command(0x02);
-    printf("USB handshake 2: %ld\n", (long)ret);
-    usleep(100000);
-
-    /* Enable motion sensors */
-    ret = subcommand(0x40, 0x01);
-    printf("Enable IMU: %ld\n", (long)ret);
-    usleep(100000);
-
-    /* Request full input reports */
-    ret = subcommand(0x03, 0x30);
-    printf("Report mode 0x30: %ld\n", (long)ret);
-
-    sleep(1);
-
-    while (1)
-    {
-        memset(input, 0, sizeof(input));
-
-        ret = USB_ReadIntrMsg(
-            fd,
-            endpoint_in,
-            sizeof(input),
-            input
-        );
-
-        if (ret < 0)
-        {
-            printf("\nUSB read error: %ld\n", (long)ret);
-            break;
+                    printf("Protocol state: %d\n", state);
+                    printf("Received report: %02X\n\n", id);
+                    dump_packet(inbuf, 16);
+                    printf("\nWaiting for next packet...\n");
+                }
+            }
         }
 
-        if (ret > 0)
-            show_report(ret);
+        frames_waiting++;
 
-        usleep(50000);
-    }
+        if (frames_waiting == 300) {
+            printf("\nWaiting for USB response...\n");
+        }
 
-    USB_CloseDevice(&fd);
-    USB_Deinitialize();
-
-    while (1)
         VIDEO_WaitVSync();
+    }
+
+    printf("\nStopping USB reader...\n");
+
+cleanup:
+    if (fd >= 0 && !pending)
+        USB_CloseDevice(&fd);
+
+    if (!pending)
+        USB_Deinitialize();
 
     return 0;
 }
