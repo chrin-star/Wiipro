@@ -378,28 +378,28 @@ int main(int argc, char **argv)
                     printf("Force USB: %ld\n",
                            (long)result);
 
-                    if (result >= 0) {
-    result = send_subcommand(fd, 0x40, 0x01);
-    printf("Enable IMU: %ld\n", (long)result);
+                                        if (result >= 0) {
+                        result = send_subcommand(fd, 0x40, 0x01);
+                        printf("Enable IMU: %ld\n", (long)result);
 
-    if (result >= 0) {
-        result = send_subcommand(fd, 0x03, 0x30);
-        printf("Set report mode 0x30: %ld\n",
-               (long)result);
+                        if (result >= 0) {
+                            result = send_subcommand(fd, 0x03, 0x30);
+                            printf("Set report mode 0x30: %ld\n",
+                                   (long)result);
 
-        if (result >= 0) {
-            state = 2;
-        } else {
-            stopping = 1;
-        }
-    } else {
-        stopping = 1;
-    }
-} else {
-    stopping = 1;
-} else {
+                            if (result >= 0) {
+                                state = 2;
+                            } else {
+                                stopping = 1;
+                            }
+                        } else {
+                            stopping = 1;
+                        }
+                    } else {
                         stopping = 1;
                     }
+
+                } else if (state == 2 && id == 0x30) {
 
                 } else if (state == 2 && id == 0x30) {
                     reports++;
